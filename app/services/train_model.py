@@ -1,137 +1,135 @@
 import os
-import librosa
-import numpy as np
-import matplotlib.pyplot as plt
-from tensorflow.keras import layers, models, regularizers
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, GlobalAveragePooling2D, GlobalMaxPooling2D
+from tensorflow.keras.layers import BatchNormalization, Dropout, Dense, Activation, Input, Concatenate
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model
+from tensorflow.keras.applications import MobileNetV2
 
-# Функция для создания мел-спектрограммы и сохранения её как изображения
-def create_mel_spectrogram(file_path, save_path=None, sr=16000, n_mels=128):
-    audio, _ = librosa.load(file_path, sr=sr)
-    mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=n_mels)
-    mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+# Конфігурація
+data_dir = 'app/data/new_spectrograms'
+img_height, img_width = 224, 224
+batch_size = 16
+epochs = 50
 
-    if save_path:
-        plt.figure(figsize=(3.2, 3.2))  # Размер изображения 224x224
-        librosa.display.specshow(mel_spec_db, sr=sr, x_axis='time', y_axis='mel')
-        plt.axis('off')
-        plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
-        plt.close()
-
-    return mel_spec_db
-
-# Генерация мел-спектрограмм для всех классов
-def generate_spectrograms(source_folder, target_folder):
-    os.makedirs(target_folder, exist_ok=True)
-    for file_name in os.listdir(source_folder):
-        if file_name.endswith('.wav'):
-            file_path = os.path.join(source_folder, file_name)
-            save_path = os.path.join(target_folder, file_name.replace('.wav', '.png'))
-            create_mel_spectrogram(file_path, save_path)
-
-print("Генерация мел-спектрограмм...")
-generate_spectrograms("app/data/ferrari_augmented", "app/data/mel_spectrograms/ferrari")
-generate_spectrograms("app/data/audi_augmented", "app/data/mel_spectrograms/audi")
-generate_spectrograms("app/data/unknown_wav", "app/data/mel_spectrograms/unknown")
-
-# Настройка генераторов данных с расширенным Data Augmentation
-datagen = ImageDataGenerator(
-    rescale=1.0 / 255,
+# Аугментація + нормалізація
+train_datagen = ImageDataGenerator(
     validation_split=0.2,
+    rescale=1. / 255,
+    rotation_range=15,
     zoom_range=0.2,
-    brightness_range=[0.8, 1.2],
+    brightness_range=[0.5, 1.5],
     width_shift_range=0.1,
     height_shift_range=0.1,
-    horizontal_flip=True
+    horizontal_flip=True,
+    fill_mode='nearest',
+    shear_range=0.2
 )
 
-train_generator = datagen.flow_from_directory(
-    "app/data/mel_spectrograms",
-    target_size=(224, 224),
-    batch_size=32,
+train_generator = train_datagen.flow_from_directory(
+    data_dir,
+    target_size=(img_height, img_width),
+    batch_size=batch_size,
     class_mode='categorical',
-    subset='training'
+    subset='training',
+    seed=42
 )
 
-val_generator = datagen.flow_from_directory(
-    "app/data/mel_spectrograms",
-    target_size=(224, 224),
-    batch_size=32,
+val_generator = train_datagen.flow_from_directory(
+    data_dir,
+    target_size=(img_height, img_width),
+    batch_size=batch_size,
     class_mode='categorical',
-    subset='validation'
+    subset='validation',
+    seed=42
 )
 
-# Создание улучшенной модели CNN
-print("Создание улучшенной модели...")
+# Поліпшена кастомна модель
+def build_optimized_model(input_shape, num_classes):
+    inputs = Input(shape=input_shape)
 
-model = models.Sequential([
-    layers.Conv2D(32, (3, 3), activation='relu', kernel_regularizer=regularizers.l2(0.01), input_shape=(224, 224, 3)),
-    layers.BatchNormalization(),
-    layers.MaxPooling2D((2, 2)),
-    layers.Dropout(0.3),
+    x = Conv2D(32, (3, 3), padding='same')(inputs)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = MaxPooling2D((2, 2))(x)
 
-    layers.Conv2D(64, (3, 3), activation='relu', kernel_regularizer=regularizers.l2(0.01)),
-    layers.BatchNormalization(),
-    layers.MaxPooling2D((2, 2)),
-    layers.Dropout(0.3),
+    x = Conv2D(64, (3, 3), padding='same')(x)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = MaxPooling2D((2, 2))(x)
 
-    layers.Conv2D(128, (3, 3), activation='relu', kernel_regularizer=regularizers.l2(0.01)),
-    layers.BatchNormalization(),
-    layers.MaxPooling2D((2, 2)),
+    x = Conv2D(128, (3, 3), padding='same')(x)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = MaxPooling2D((2, 2))(x)
 
-    layers.GlobalAveragePooling2D(),
-    layers.Dense(128, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(3, activation='softmax')
-])
+    # Об'єднання GlobalAverage + GlobalMax pooling
+    gap = GlobalAveragePooling2D()(x)
+    gmp = GlobalMaxPooling2D()(x)
+    x = Concatenate()([gap, gmp])
 
-# Компиляция модели
-model.compile(optimizer=tf.keras.optimizers.RMSprop(learning_rate=0.0001),
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    outputs = Dense(num_classes, activation='softmax')(x)
 
-# Обучение модели
-print("Начало обучения улучшенной модели...")
-early_stopping = EarlyStopping(monitor='val_loss', patience=7, restore_best_weights=True)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=1e-6)
+    model = Model(inputs=inputs, outputs=outputs)
 
+    model.compile(
+        optimizer=Adam(learning_rate=5e-5),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+
+    return model
+
+# Або transfer learning з MobileNetV2
+def build_transfer_model(input_shape, num_classes):
+    base_model = MobileNetV2(
+        input_shape=input_shape,
+        include_top=False,
+        weights='imagenet'
+    )
+    base_model.trainable = False
+
+    inputs = Input(shape=input_shape)
+    x = base_model(inputs, training=False)
+    x = GlobalAveragePooling2D()(x)
+    x = Dropout(0.2)(x)
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(0.2)(x)
+    outputs = Dense(num_classes, activation='softmax')(x)
+
+    model = Model(inputs, outputs)
+
+    model.compile(
+        optimizer=Adam(learning_rate=5e-5),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+
+    return model
+
+# Вибір моделі:
+model = build_optimized_model((img_height, img_width, 3), train_generator.num_classes)
+# model = build_transfer_model((img_height, img_width, 3), train_generator.num_classes)
+
+# Колбеки
+callbacks = [
+    EarlyStopping(monitor='val_loss', patience=7, restore_best_weights=True),
+    ReduceLROnPlateau(patience=3, factor=0.5, verbose=1),
+    ModelCheckpoint('app/models/best_model.keras', save_best_only=True, monitor='val_accuracy', mode='max')
+]
+
+# Навчання
 history = model.fit(
     train_generator,
     validation_data=val_generator,
-    epochs=50,
-    callbacks=[early_stopping, reduce_lr]
+    epochs=epochs,
+    callbacks=callbacks
 )
 
-# Сохранение модели
-model_path = "app/models/cnn_classifier.h5"
-model.save(model_path)
-print(f"Модель успешно обучена и сохранена: {model_path}")
-
-# Визуализация результатов обучения
-def plot_training_results(history):
-    plt.figure(figsize=(12, 6))
-
-    # Точность
-    plt.subplot(1, 2, 1)
-    plt.plot(history.history['accuracy'], label='Train Accuracy')
-    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-    plt.title('Точность модели')
-    plt.xlabel('Эпохи')
-    plt.ylabel('Точность')
-    plt.legend()
-
-    # Потери
-    plt.subplot(1, 2, 2)
-    plt.plot(history.history['loss'], label='Train Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.title('Потери модели')
-    plt.xlabel('Эпохи')
-    plt.ylabel('Потери')
-    plt.legend()
-
-    plt.tight_layout()
-    plt.show()
-
-plot_training_results(history)
+# Збереження
+model.save('app/models/final_model.keras', save_format='keras')
+print("✅ Модель успішно навчена і збережена.")
