@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Шляхи
-input_dir = '/Users/illiakrytskyi/Documents/KNU/Kursova/DATASETS/RECOGNITION5s'
-output_dir = 'app/data/test_mel_spectrograms'
+input_dir = '/Users/illiakrytskyi/Documents/KNU/Kursova/DATASETS/RECOGNITION_MULTI'
+output_dir = 'app/data/big_mel_spectrograms'
 
 # Очистити стару папку
 if os.path.exists(output_dir):
